@@ -5,7 +5,7 @@
 
 #include <SoftwareSerial.h>
 
-SoftwareSerial bleSerial(A0, A1); // RX, TX
+SoftwareSerial bleSerial(A0, A1); // RX, TX 
 
 //-----------------------------------------------------
 
@@ -54,8 +54,8 @@ FlightPhase currentPhase = IDLE;
 unsigned long phaseStartTime = 0;
 
 // 비행 파라미터
-const int CRUISE_ALTITUDE = 120;     // 순항 고도 (120cm)
-const int FLIGHT_SPEED = 100;        // 비행 속도 (최적화된 값)
+const int CRUISE_ALTITUDE = 140;     // 순항 고도 (더 높은 고도로 증가)
+const int FLIGHT_SPEED = 80;         // 비행 속도 (안정성을 위해 약간 감소)
 const int HOVER_TIME = 500;          // 각 지점 호버링 시간 (ms)
 
 // 이동 시간 계산 (ms)
@@ -129,10 +129,10 @@ void takeoff()
   unsigned long elapsedTime = millis() - phaseStartTime;
 
   if(elapsedTime < 1000) {
-    throttle = 40;  // 초기 상승
+    throttle = 60;  // 초기 상승 (더 강하게)
   }
   else if(elapsedTime < 2000) {
-    throttle = 80;  // 중간 고도
+    throttle = 100;  // 중간 고도 (더 높이)
   }
   else {
     throttle = CRUISE_ALTITUDE;  // 순항 고도
@@ -150,10 +150,13 @@ void land()
   unsigned long elapsedTime = millis() - phaseStartTime;
 
   if(elapsedTime < 1000) {
-    throttle = 80;  // 천천히 하강 시작
+    throttle = 100;  // 천천히 하강 시작
   }
   else if(elapsedTime < 2000) {
-    throttle = 40;  // 저고도
+    throttle = 60;  // 중간 고도
+  }
+  else if(elapsedTime < 3000) {
+    throttle = 30;  // 저고도
   }
   else {
     throttle = 0;   // 완전 착륙
@@ -405,7 +408,7 @@ void updateFlightPhase()
 
     case LANDING:
       land();
-      if(elapsedTime > 2500) {  // 2.5초 착륙
+      if(elapsedTime > 3500) {  // 3.5초 착륙 (더 부드럽게)
         Serial.println("Flight Completed!");
         currentPhase = COMPLETED;
         option = 0x000e;  // 모터 정지
