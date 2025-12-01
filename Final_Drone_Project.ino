@@ -1,4 +1,6 @@
 //-----------------------------------------------------
+// 자율 경로비행 드론 제어 프로그램
+// 2m x 3m 직사각형 경로 (1→2→3→4→1)
 //-----------------------------------------------------
 
 #include <SoftwareSerial.h>
@@ -26,143 +28,149 @@ int y_vel = 0x0064;
 
 unsigned char drone_action = 0;
 unsigned char payload[14];
-unsigned int firstRoll;
-unsigned int firstPitch;
 //===== 드론 2호 제어에 필요한 변수 선언 부분 끝 =====
 
 //-----------------------------------------------------
 
-//=========== 드론 2호 높이 제어 부분 시작 ===========
-void checkThrottle()
-{
-  
-  //throttle 값 감소 : 드론 2호 하강 제어 부분
-  if(!digitalRead(6))
-  {
-    if(throttle > 9)
-      throttle -= 10;
-  }
-  
-  //throttle 값 증가 : 드론 2호 상승 제어 부분
-  else if(!digitalRead(5))
-  {
-    if(throttle < 141)
-      throttle += 20;
-  }
-}
-//============ 드론 2호 높이 제어 부분 끝 ============
+//========== 자율비행 제어 변수 선언 부분 시작 ==========
+// 비행 단계 정의
+enum FlightPhase {
+  IDLE,           // 대기
+  TAKEOFF,        // 이륙
+  HOVER_START,    // 시작점 호버링
+  MOVE_TO_P2,     // 지점 2로 이동
+  HOVER_P2,       // 지점 2 호버링
+  MOVE_TO_P3,     // 지점 3으로 이동
+  HOVER_P3,       // 지점 3 호버링
+  MOVE_TO_P4,     // 지점 4로 이동
+  HOVER_P4,       // 지점 4 호버링
+  MOVE_TO_P1,     // 시작점으로 복귀
+  HOVER_FINAL,    // 최종 호버링
+  LANDING,        // 착륙
+  COMPLETED       // 완료
+};
+
+FlightPhase currentPhase = IDLE;
+unsigned long phaseStartTime = 0;
+
+// 비행 파라미터
+const int CRUISE_ALTITUDE = 120;     // 순항 고도 (120cm)
+const int FLIGHT_SPEED = 100;        // 비행 속도 (최적화된 값)
+const int HOVER_TIME = 500;          // 각 지점 호버링 시간 (ms)
+
+// 이동 시간 계산 (ms)
+// 속도와 거리를 고려한 실험적 값
+const unsigned long TIME_TO_P2 = 3500;   // 3m 이동 (우측)
+const unsigned long TIME_TO_P3 = 2500;   // 2m 이동 (전진)
+const unsigned long TIME_TO_P4 = 3500;   // 3m 이동 (좌측)
+const unsigned long TIME_TO_P1 = 2500;   // 2m 이동 (후진)
+
+// 시작 버튼 플래그
+bool flightStarted = false;
+//========== 자율비행 제어 변수 선언 부분 끝 ==========
 
 //-----------------------------------------------------
 
-//=== 드론 2호 좌회전/우회전(제자리) 제어 부분 시작 ===
-void checkYaw()
+//============ 자율비행 제어 함수 부분 시작 ============
+
+// 드론 정지 (호버링)
+void hoverDrone()
 {
-  if(throttle == 0)
-    yaw = 0;
-    
-  //yaw 값 감소 : 드론 2호 좌회전(제자리) 제어 부분
-  if(!digitalRead(7))
-  {
-    if(yaw > -170)
-      yaw -= 10;
+  roll = 0;
+  pitch = 0;
+  yaw = 0;
+  throttle = CRUISE_ALTITUDE;
+}
+
+// 우측으로 이동 (지점 1 → 2)
+void moveRight()
+{
+  roll = FLIGHT_SPEED;
+  pitch = 0;
+  yaw = 0;
+  throttle = CRUISE_ALTITUDE;
+}
+
+// 전진 (지점 2 → 3)
+void moveForward()
+{
+  roll = 0;
+  pitch = FLIGHT_SPEED;
+  yaw = 0;
+  throttle = CRUISE_ALTITUDE;
+}
+
+// 좌측으로 이동 (지점 3 → 4)
+void moveLeft()
+{
+  roll = -FLIGHT_SPEED;
+  pitch = 0;
+  yaw = 0;
+  throttle = CRUISE_ALTITUDE;
+}
+
+// 후진 (지점 4 → 1)
+void moveBackward()
+{
+  roll = 0;
+  pitch = -FLIGHT_SPEED;
+  yaw = 0;
+  throttle = CRUISE_ALTITUDE;
+}
+
+// 이륙 시퀀스
+void takeoff()
+{
+  roll = 0;
+  pitch = 0;
+  yaw = 0;
+
+  // 부드러운 이륙을 위한 단계적 상승
+  unsigned long elapsedTime = millis() - phaseStartTime;
+
+  if(elapsedTime < 1000) {
+    throttle = 40;  // 초기 상승
   }
-  
-  //yaw 값 증가 : 드론 2호 우회전(제자리) 제어 부분
-  else if(!digitalRead(8))
-  {
-    if(yaw < 170)
-      yaw += 10;
+  else if(elapsedTime < 2000) {
+    throttle = 80;  // 중간 고도
+  }
+  else {
+    throttle = CRUISE_ALTITUDE;  // 순항 고도
   }
 }
-//==== 드론 2호 좌회전/우회전(제자리) 제어 부분 끝 ====
 
-//-----------------------------------------------------
-
-//========= 드론 2호 비상 착륙 제어 부분 시작 =========
-void checkEmergency()
+// 착륙 시퀀스
+void land()
 {
-  //비상버튼 눌리는지 체크하는 부분
-  if(!digitalRead(9))
-  {
-    roll = 0;
-    pitch = 0;
-    yaw = 0;
-    throttle = 0;
-    //
-    option = 0x000e;
+  roll = 0;
+  pitch = 0;
+  yaw = 0;
+
+  // 부드러운 착륙을 위한 단계적 하강
+  unsigned long elapsedTime = millis() - phaseStartTime;
+
+  if(elapsedTime < 1000) {
+    throttle = 80;  // 천천히 하강 시작
   }
-  else
-  {
-    option = 0x000f;
+  else if(elapsedTime < 2000) {
+    throttle = 40;  // 저고도
+  }
+  else {
+    throttle = 0;   // 완전 착륙
   }
 }
-//========== 드론 2호 비상 착륙 제어 부분 끝 ==========
 
-//-----------------------------------------------------
-
-//====== 드론 2호 좌측/우측 이동 제어 부분 시작 ======
-void checkRoll()
+// 비상 정지
+void emergencyStop()
 {
-  //roll 값 증가 : 오른쪽 이동, roll 값 감소 : 왼쪽 이동
-  unsigned int secondRoll = analogRead(4);
-
-  if(secondRoll < firstRoll - 450)
-    roll = -200;
-  else if(secondRoll < firstRoll - 350)
-    roll = -160;
-  else if(secondRoll < firstRoll - 250)
-    roll = -120;
-  else if(secondRoll < firstRoll - 150)
-    roll = -80;
-  else if(secondRoll < firstRoll - 50)
-    roll = -40;
-  else if(secondRoll < firstRoll + 50)
-    roll = 0;
-  else if(secondRoll < firstRoll + 150)
-    roll = 40;
-  else if(secondRoll < firstRoll + 250)
-    roll = 80;
-  else if(secondRoll < firstRoll + 350)
-    roll = 120;
-  else if(secondRoll < firstRoll + 450)
-    roll = 160;
-  else
-    roll = 200;
+  roll = 0;
+  pitch = 0;
+  yaw = 0;
+  throttle = 0;
+  option = 0x000e;
+  currentPhase = COMPLETED;
 }
-//======= 드론 2호 좌측/우측 이동 제어 부분 끝 =======
-
-//-----------------------------------------------------
-
-//====== 드론 2호 전진/후진 이동 제어 부분 시작 ======
-void checkPitch()
-{
-  //pitch 값 증가 : 앞으로 이동, pitch 값 감소 : 뒤로 이동
-  unsigned int secondPitch = analogRead(5);
-
-  if(secondPitch < firstPitch - 450)
-    pitch = -200;
-  else if(secondPitch < firstPitch - 350)
-    pitch = -160;
-  else if(secondPitch < firstPitch - 250)
-    pitch = -120;
-  else if(secondPitch < firstPitch - 150)
-    pitch = -80;
-  else if(secondPitch < firstPitch - 50)
-    pitch = -40;
-  else if(secondPitch < firstPitch + 50)
-    pitch = 0;
-  else if(secondPitch < firstPitch + 150)
-    pitch = 40;
-  else if(secondPitch < firstPitch + 250)
-    pitch = 80;
-  else if(secondPitch < firstPitch + 350)
-    pitch = 120;
-  else if(secondPitch < firstPitch + 450)
-    pitch = 160;
-  else
-    pitch = 200;
-}
-//======= 드론 2호 전진/후진 이동 제어 부분 끝 =======
+//============ 자율비행 제어 함수 부분 끝 ============
 
 //-----------------------------------------------------
 
@@ -281,18 +289,139 @@ void checkCRC()
 
 //-----------------------------------------------------
 
-//==== 드론 2호 제어 명령 데이터 첫 진행 부분 시작 ====
-unsigned char startDroneControl()
+//======== 자율비행 상태 머신 제어 부분 시작 ========
+void updateFlightPhase()
 {
-   if(!digitalRead(9))
-   {
-     firstRoll = analogRead(4);
-     firstPitch = analogRead(5);
-     drone_action = 1;
-   }
-   return drone_action;
+  unsigned long currentTime = millis();
+  unsigned long elapsedTime = currentTime - phaseStartTime;
+
+  // 비상정지 버튼 체크 (버튼 9)
+  if(!digitalRead(9) && currentPhase != IDLE && currentPhase != COMPLETED) {
+    Serial.println("Emergency Stop!");
+    emergencyStop();
+    return;
+  }
+
+  switch(currentPhase) {
+    case IDLE:
+      // 시작 버튼 대기 (버튼 5)
+      if(!digitalRead(5)) {
+        Serial.println("Flight Started!");
+        currentPhase = TAKEOFF;
+        phaseStartTime = currentTime;
+        drone_action = 1;
+      }
+      break;
+
+    case TAKEOFF:
+      takeoff();
+      if(elapsedTime > 2500) {  // 2.5초 이륙
+        Serial.println("Takeoff Complete - Hovering at Start");
+        currentPhase = HOVER_START;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case HOVER_START:
+      hoverDrone();
+      if(elapsedTime > HOVER_TIME) {
+        Serial.println("Moving to Point 2 (Right)");
+        currentPhase = MOVE_TO_P2;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case MOVE_TO_P2:
+      moveRight();
+      if(elapsedTime > TIME_TO_P2) {
+        Serial.println("Reached Point 2 - Hovering");
+        currentPhase = HOVER_P2;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case HOVER_P2:
+      hoverDrone();
+      if(elapsedTime > HOVER_TIME) {
+        Serial.println("Moving to Point 3 (Forward)");
+        currentPhase = MOVE_TO_P3;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case MOVE_TO_P3:
+      moveForward();
+      if(elapsedTime > TIME_TO_P3) {
+        Serial.println("Reached Point 3 - Hovering");
+        currentPhase = HOVER_P3;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case HOVER_P3:
+      hoverDrone();
+      if(elapsedTime > HOVER_TIME) {
+        Serial.println("Moving to Point 4 (Left)");
+        currentPhase = MOVE_TO_P4;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case MOVE_TO_P4:
+      moveLeft();
+      if(elapsedTime > TIME_TO_P4) {
+        Serial.println("Reached Point 4 - Hovering");
+        currentPhase = HOVER_P4;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case HOVER_P4:
+      hoverDrone();
+      if(elapsedTime > HOVER_TIME) {
+        Serial.println("Returning to Point 1 (Backward)");
+        currentPhase = MOVE_TO_P1;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case MOVE_TO_P1:
+      moveBackward();
+      if(elapsedTime > TIME_TO_P1) {
+        Serial.println("Returned to Start - Final Hovering");
+        currentPhase = HOVER_FINAL;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case HOVER_FINAL:
+      hoverDrone();
+      if(elapsedTime > HOVER_TIME) {
+        Serial.println("Starting Landing");
+        currentPhase = LANDING;
+        phaseStartTime = currentTime;
+      }
+      break;
+
+    case LANDING:
+      land();
+      if(elapsedTime > 2500) {  // 2.5초 착륙
+        Serial.println("Flight Completed!");
+        currentPhase = COMPLETED;
+        option = 0x000e;  // 모터 정지
+      }
+      break;
+
+    case COMPLETED:
+      roll = 0;
+      pitch = 0;
+      yaw = 0;
+      throttle = 0;
+      option = 0x000e;
+      break;
+  }
 }
-//===== 드론 2호 제어 명령 데이터 첫 진행 부분 끝 =====
+//========= 자율비행 상태 머신 제어 부분 끝 =========
 
 //-----------------------------------------------------
 
@@ -316,17 +445,13 @@ void setup()
 
 //======== 아두이노 우노의 무한 반복 부분 시작 ========
 void loop()
-{ 
-  if(startDroneControl())
-  {
-    checkThrottle();
-    checkRoll();
-    checkPitch();
-    checkYaw();
-    checkEmergency();
-    //
+{
+  // 자율비행 상태 머신 업데이트
+  updateFlightPhase();
+
+  // 드론 제어 명령 전송 (IDLE 상태가 아닐 때만)
+  if(currentPhase != IDLE) {
     checkCRC();
-    //
     sendDroneCommand();
   }
 }
