@@ -1,39 +1,41 @@
 # 자율 경로비행 드론 프로젝트
 
-마이크로컨트롤러 수업 기말 프로젝트 - 2m x 3m 직사각형 경로 자율비행
+마이크로컨트롤러 수업 기말 프로젝트 - 3.12m x 2.61m 직사각형 경로 자율비행
 
 ## 프로젝트 개요
 
-Arduino 기반 드론이 사전 지정된 직사각형 경로를 자율적으로 비행하여 시작점으로 정확하게 복귀하는 시스템입니다.
+Arduino 기반 드론이 실측 보정된 직사각형 경로를 정밀하게 자율비행하여 시작점으로 복귀하는 시스템입니다.
 
-## 비행 경로
+## 비행 경로 (실측 보정판)
 
 ```
-    4 ←─────── 3
-    │     3m   ↑
-2m  │          │ 2m
-    ↓          │
-    1 ───────→ 2
-        3m
+    4 ←──────── 3
+    │   3.12m   ↑
+2.61m │         │ 2.61m
+    ↓           │
+    1 ────────→ 2
+       3.12m
 ```
 
 - 시작점 (Point 1): 이륙 및 착륙 위치
-- Point 2: 우측으로 3m 이동
-- Point 3: 전진 2m 이동
-- Point 4: 좌측으로 3m 이동
-- Point 1: 후진 2m로 시작점 복귀
+- Point 2: 전진 3.12m 이동
+- Point 3: 우측으로 2.61m 이동
+- Point 4: 후진 3.12m 이동
+- Point 1: 좌측으로 2.61m로 시작점 복귀
 
 ## 주요 사양
 
-### 비행 파라미터
-- **순항 고도**: 120cm
-- **비행 속도**: 최적화된 속도로 빠른 비행
-- **호버링 시간**: 각 지점에서 0.5초
+### 비행 파라미터 (실측 보정)
+- **순항 고도**: 120cm (ALTHOLD 모드)
+- **이동 파워**: 100 (고정값)
+- **전진/후진 시간**: 2443ms (3.12m 기준)
+- **좌우 이동 시간**: 2337ms (2.61m 기준)
+- **안정화 시간**: 각 동작 후 2초
 
 ### 비행 시퀀스
-1. **이륙 (2.5초)**: 부드러운 단계적 상승
-2. **경로 비행**: 4개 지점을 순차적으로 방문
-3. **착륙 (2.5초)**: 시작점에서 안전한 하강
+1. **이륙 및 고도 고정 (5초)**: ALTHOLD 모드로 120cm 고정
+2. **경로 비행**: 실측 기반 타이밍으로 정밀 이동
+3. **소프트 랜딩**: 30ms마다 1cm씩 부드러운 하강
 
 ## 하드웨어 구성
 
@@ -41,8 +43,7 @@ Arduino 기반 드론이 사전 지정된 직사각형 경로를 자율적으로
 - 드론 2호 (BLE 통신)
 - HC-06 블루투스 모듈 (A0: RX, A1: TX)
 - 제어 버튼
-  - Pin 5: 시작 버튼
-  - Pin 9: 비상정지 버튼
+  - Pin 9: Emergency 버튼 (시작 버튼으로 사용)
 
 ## 사용 방법
 
@@ -53,79 +54,92 @@ Arduino 기반 드론이 사전 지정된 직사각형 경로를 자율적으로
 4. 시리얼 모니터 연결 (9600 baud)
 
 ### 2. 비행 시작
-1. Pin 5 버튼을 눌러 자율비행 시작
-2. 드론이 자동으로 이륙하여 경로 비행 수행
-3. 시작점 복귀 후 자동 착륙
+1. Pin 9 (Emergency) 버튼을 눌러 자율비행 시작
+2. 드론이 자동으로 이륙 → 고도 고정 (5초)
+3. 실측 경로 비행: 전진 → 우측 → 후진 → 좌측
+4. 시작점 복귀 후 소프트 랜딩
 
-### 3. 비상 상황
-- Pin 9 버튼을 누르면 즉시 비상정지 및 착륙
+### 3. 안전 기능
+- ALTHOLD 모드로 고도 자동 유지
+- 각 동작 후 2초 안정화 시간
+- 부드러운 소프트 랜딩 알고리즘
 
 ## 코드 구조
 
+### 상태 머신 (State Machine)
+
+```
+State 0: 대기 (Emergency 버튼 입력 대기)
+   ↓
+State 1: 이륙 및 고도 고정 (5초, ALTHOLD 120cm)
+   ↓
+State 2: 전진 이동 (2443ms, Power 100)
+   ↓
+State 3: 안정화 (2초)
+   ↓
+State 4: 우측 이동 (2337ms, Power 100)
+   ↓
+State 5: 안정화 (2초)
+   ↓
+State 6: 후진 이동 (2443ms, Power 100)
+   ↓
+State 7: 안정화 (2초)
+   ↓
+State 8: 좌측 이동 (2337ms, Power 100)
+   ↓
+State 9: 소프트 랜딩 (30ms당 1cm 하강)
+   ↓
+State 10: 완전 종료
+```
+
 ### 주요 함수
-
-#### 이동 제어 함수
-- `moveRight()`: 우측 이동 (1→2)
-- `moveForward()`: 전진 (2→3)
-- `moveLeft()`: 좌측 이동 (3→4)
-- `moveBackward()`: 후진 (4→1)
-- `hoverDrone()`: 호버링
-
-#### 비행 단계 함수
-- `takeoff()`: 단계적 이륙 시퀀스
-- `land()`: 단계적 착륙 시퀀스
-- `emergencyStop()`: 비상정지
-
-#### 상태 머신
-- `updateFlightPhase()`: 비행 단계 자동 전환
-
-### 비행 단계 (FlightPhase)
-```
-IDLE → TAKEOFF → HOVER_START
-  → MOVE_TO_P2 → HOVER_P2
-  → MOVE_TO_P3 → HOVER_P3
-  → MOVE_TO_P4 → HOVER_P4
-  → MOVE_TO_P1 → HOVER_FINAL
-  → LANDING → COMPLETED
-```
+- `sendDroneCommand()`: BLE 프로토콜로 드론에 명령 전송
+- `checkCRC()`: 데이터 무결성 검증을 위한 체크섬 계산
+- `loop()`: 상태 머신 기반 자율비행 제어
 
 ## 성능 최적화
 
-### 속도 최적화
-- 각 구간별 최적화된 이동 시간
-- 최소한의 호버링으로 빠른 경로 완주
+### 정밀도 향상
+- **실측 기반 보정**: 실제 비행 데이터로 이동 시간 정밀 보정
+- **ALTHOLD 모드**: 자동 고도 유지로 일정한 고도 유지
+- **고정 파워값**: Power 100 고정으로 일관된 이동 속도
 
-### 정확도 최적화
-- 시간 기반 경로 제어로 일관된 비행
-- 부드러운 이착륙으로 위치 정확도 향상
-- 각 지점에서 호버링으로 위치 보정
+### 안정성 향상
+- 각 동작 후 2초 안정화 시간으로 드리프트 최소화
+- 소프트 랜딩 알고리즘으로 충격 없는 착륙
+- 상태 머신 기반 제어로 예측 가능한 동작
 
-## 평가 기준 대응
+## 실측 보정 데이터
 
-### 1. 정확도
-- 시작점 복귀 정확도: 시간 기반 제어로 일관된 경로
-- 고도 유지: 120cm 일정 유지
+### 측정 환경
+- 고도: 120cm (ALTHOLD)
+- 파워: 100 (고정)
 
-### 2. 속도
-- 총 비행 시간: 약 15초 (이착륙 제외)
-- 최적화된 이동 속도와 최소 호버링
+### 보정된 시간 값
+- **전진/후진 (3.12m)**: 2443ms
+  - 기존 예측: 2357ms
+  - 실측 평균으로 보정
+- **좌우 이동 (2.61m)**: 2337ms
+  - 기존 예측: 2301ms
+  - 실측 평균으로 보정
 
 ## 튜닝 가이드
 
-실제 비행 테스트 후 다음 값들을 조정할 수 있습니다:
+추가 보정이 필요한 경우 다음 값들을 조정할 수 있습니다:
 
 ```cpp
-// 비행 속도 조정
-const int FLIGHT_SPEED = 100;  // 50~150 범위에서 조정
+// 이동 파워 조정 (현재: 100 고정)
+#define MOVE_POWER 100      // 80~120 범위 권장
 
-// 이동 시간 조정 (실제 거리와 속도에 맞춰 미세조정)
-const unsigned long TIME_TO_P2 = 3500;  // 3m 이동
-const unsigned long TIME_TO_P3 = 2500;  // 2m 이동
-const unsigned long TIME_TO_P4 = 3500;  // 3m 이동
-const unsigned long TIME_TO_P1 = 2500;  // 2m 이동
+// 목표 고도 조정
+#define HOVER_HEIGHT 120    // 100~150cm 범위 권장
 
-// 고도 조정
-const int CRUISE_ALTITUDE = 120;  // 120cm
+// 이동 시간 미세 조정 (실측 데이터 기반)
+#define TIME_FORWARD  2443  // 3.12m 전진/후진
+#define TIME_RIGHT    2337  // 2.61m 좌우 이동
+
+// 안정화 시간 조정
+#define TIME_HOVER    2000  // 동작 사이 안정화 (ms)
 ```
 
 ## 시리얼 모니터 출력
@@ -133,19 +147,17 @@ const int CRUISE_ALTITUDE = 120;  // 120cm
 비행 중 다음과 같은 상태 메시지가 출력됩니다:
 
 ```
-Test Started!
-Flight Started!
-Takeoff Complete - Hovering at Start
-Moving to Point 2 (Right)
-Reached Point 2 - Hovering
-Moving to Point 3 (Forward)
-Reached Point 3 - Hovering
-Moving to Point 4 (Left)
-Reached Point 4 - Hovering
-Returning to Point 1 (Backward)
-Returned to Start - Final Hovering
-Starting Landing
-Flight Completed!
+Calibrated System Ready. Press Emergency Button (D9) to START.
+State 1: Takeoff & Altitude Fix (1.2m)
+State 2: Moving Forward (3.12m)
+State 3: Hovering (Stabilize)
+State 4: Moving Right (2.61m)
+State 5: Hovering (Stabilize)
+State 6: Moving Backward (3.12m)
+State 7: Hovering (Stabilize)
+State 8: Moving Left (2.61m)
+State 9: Soft Landing...
+State 10: Shutdown
 ```
 
 ## 라이선스
