@@ -15,8 +15,8 @@ SoftwareSerial bleSerial(A0, A1); // RX, TX
 #define HOVER_HEIGHT 120    // 목표 유지 고도 (120cm)
 
 // 실측 데이터 기반 계산된 시간  
-#define TIME_FORWARD  2443  // 3.12m 이동 시간 (ms)
-#define TIME_RIGHT    2337  // 2.61m 이동 시간 (ms)
+#define TIME_FORWARD  2400  // 3.12m 이동 시간 (ms)
+#define TIME_RIGHT    2450  // 2.61m 이동 시간 (ms)
 #define TIME_HOVER    2000  // 동작 사이 안정화 시간 (2초)
 
 // --- 변수 선언 ---
