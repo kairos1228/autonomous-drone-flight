@@ -1,272 +1,235 @@
-//-----------------------------------------------------
-// 자율 경로비행 드론 제어 프로그램
-// 2m x 3m 직사각형 경로 (1→2→3→4→1)
-//-----------------------------------------------------
+/*
+ * 드론 2호 자율주행 최종 코드 (3.12m x 2.61m 정밀 보정판)
+ * - 고도: 120cm (ALTHOLD) / Power 100 사용
+ * - 실측 기반 시간 보정 완료:
+ * [전진] 3.12m -> 2357ms
+ * [우측] 2.61m -> 2301ms
+ */
 
 #include <SoftwareSerial.h>
 
-SoftwareSerial bleSerial(A0, A1); // RX, TX 
+SoftwareSerial bleSerial(A0, A1); // RX, TX
 
-//-----------------------------------------------------
+// --- [사용자 설정 값 (보정됨)] ---
+#define MOVE_POWER 100      // 이동 파워 고정
+#define HOVER_HEIGHT 120    // 목표 유지 고도 (120cm)
 
-//==== 드론 2호 제어에 필요한 변수 선언 부분 시작 ====
+// 실측 데이터 기반 계산된 시간  
+#define TIME_FORWARD  2443  // 3.12m 이동 시간 (ms)
+#define TIME_RIGHT    2337  // 2.61m 이동 시간 (ms)
+#define TIME_HOVER    2000  // 동작 사이 안정화 시간 (2초)
+
+// --- 변수 선언 ---
 unsigned char startBit_1 = 0x26;
 unsigned char startBit_2 = 0xa8;
 unsigned char startBit_3 = 0x14;
 unsigned char startBit_4 = 0xb1;
 unsigned char len = 0x14;
 unsigned char checkSum = 0;
-//
+
 int roll = 0;
 int pitch = 0;
 int yaw = 0;
 int throttle = 0;
-int option = 0x000f;
-//
+int option = 0x000e; // 초기값: 시동 꺼짐 (Emergency)
+
 int p_vel = 0x0064;
 int y_vel = 0x0064;
 
-unsigned char drone_action = 0;
 unsigned char payload[14];
-//===== 드론 2호 제어에 필요한 변수 선언 부분 끝 =====
 
-//-----------------------------------------------------
+// --- 상태 머신 ---
+unsigned long timerStart = 0;
+int flightState = 0; 
 
-//========== 자율비행 제어 변수 선언 부분 시작 ==========
-// 비행 단계 정의
-enum FlightPhase {
-  IDLE,           // 대기
-  TAKEOFF,        // 이륙
-  HOVER_START,    // 시작점 호버링
-  MOVE_TO_P2,     // 지점 2로 이동
-  HOVER_P2,       // 지점 2 호버링
-  MOVE_TO_P3,     // 지점 3으로 이동
-  HOVER_P3,       // 지점 3 호버링
-  MOVE_TO_P4,     // 지점 4로 이동
-  HOVER_P4,       // 지점 4 호버링
-  MOVE_TO_P1,     // 시작점으로 복귀
-  HOVER_FINAL,    // 최종 호버링
-  LANDING,        // 착륙
-  COMPLETED       // 완료
-};
-
-FlightPhase currentPhase = IDLE;
-unsigned long phaseStartTime = 0;
-
-// 비행 파라미터
-const int CRUISE_ALTITUDE = 140;     // 순항 고도 (더 높은 고도로 증가)
-const int FLIGHT_SPEED = 80;         // 비행 속도 (안정성을 위해 약간 감소)
-const int HOVER_TIME = 500;          // 각 지점 호버링 시간 (ms)
-
-// 이동 시간 계산 (ms)
-// 속도와 거리를 고려한 실험적 값
-const unsigned long TIME_TO_P2 = 3500;   // 3m 이동 (우측)
-const unsigned long TIME_TO_P3 = 2500;   // 2m 이동 (전진)
-const unsigned long TIME_TO_P4 = 3500;   // 3m 이동 (좌측)
-const unsigned long TIME_TO_P1 = 2500;   // 2m 이동 (후진)
-
-// 시작 버튼 플래그
-bool flightStarted = false;
-//========== 자율비행 제어 변수 선언 부분 끝 ==========
-
-//-----------------------------------------------------
-
-//============ 자율비행 제어 함수 부분 시작 ============
-
-// 드론 정지 (호버링)
-void hoverDrone()
-{
-  roll = 0;
-  pitch = 0;
-  yaw = 0;
-  throttle = CRUISE_ALTITUDE;
-}
-
-// 우측으로 이동 (지점 1 → 2)
-void moveRight()
-{
-  roll = FLIGHT_SPEED;
-  pitch = 0;
-  yaw = 0;
-  throttle = CRUISE_ALTITUDE;
-}
-
-// 전진 (지점 2 → 3)
-void moveForward()
-{
-  roll = 0;
-  pitch = FLIGHT_SPEED;
-  yaw = 0;
-  throttle = CRUISE_ALTITUDE;
-}
-
-// 좌측으로 이동 (지점 3 → 4)
-void moveLeft()
-{
-  roll = -FLIGHT_SPEED;
-  pitch = 0;
-  yaw = 0;
-  throttle = CRUISE_ALTITUDE;
-}
-
-// 후진 (지점 4 → 1)
-void moveBackward()
-{
-  roll = 0;
-  pitch = -FLIGHT_SPEED;
-  yaw = 0;
-  throttle = CRUISE_ALTITUDE;
-}
-
-// 이륙 시퀀스
-void takeoff()
-{
-  roll = 0;
-  pitch = 0;
-  yaw = 0;
-
-  // 부드러운 이륙을 위한 단계적 상승
-  unsigned long elapsedTime = millis() - phaseStartTime;
-
-  if(elapsedTime < 1000) {
-    throttle = 60;  // 초기 상승 (더 강하게)
+void setup() {
+  Serial.begin(9600);
+  bleSerial.begin(9600);
+  
+  // 핀 설정
+  for(int i = 5; i < 11; i++) {
+    pinMode(i, INPUT);
+    digitalWrite(i, HIGH); // 풀업
   }
-  else if(elapsedTime < 2000) {
-    throttle = 100;  // 중간 고도 (더 높이)
-  }
-  else {
-    throttle = CRUISE_ALTITUDE;  // 순항 고도
-  }
+  delay(500);
+  Serial.println("Calibrated System Ready. Press Emergency Button (D9) to START.");
 }
 
-// 착륙 시퀀스
-void land()
-{
-  roll = 0;
-  pitch = 0;
-  yaw = 0;
+void loop() {
+  unsigned long currentTime = millis();
+  unsigned long timeElapsed = currentTime - timerStart;
 
-  // 부드러운 착륙을 위한 단계적 하강
-  unsigned long elapsedTime = millis() - phaseStartTime;
+  switch (flightState) {
+    
+    // [단계 0] 대기 (시작 신호 대기)
+    case 0:
+      option = 0x000e; // 시동 OFF
+      roll = 0; pitch = 0; yaw = 0; throttle = 0;
+      
+      if (!digitalRead(9)) { // 버튼 눌림 감지
+        flightState = 1;
+        timerStart = currentTime;
+        Serial.println("State 1: Takeoff & Altitude Fix (1.2m)");
+      }
+      break;
 
-  if(elapsedTime < 1000) {
-    throttle = 100;  // 천천히 하강 시작
+    // [단계 1] 이륙 및 고도 고정 (5초 대기)
+    case 1:
+      option = 0x000f; // 비행 모드 ON (ALTHOLD 활성화)
+      throttle = HOVER_HEIGHT; // 120cm 고도 명령
+      roll = 0; pitch = 0; yaw = 0;
+
+      if (timeElapsed > 5000) { 
+        flightState = 2;
+        timerStart = currentTime;
+        Serial.println("State 2: Moving Forward (3.12m)");
+      }
+      break;
+
+    // [단계 2] 전진 (2357ms)
+    case 2:
+      throttle = HOVER_HEIGHT; 
+      pitch = MOVE_POWER;
+      roll = 0;
+
+      if (timeElapsed > TIME_FORWARD) {
+        flightState = 3;
+        timerStart = currentTime;
+        Serial.println("State 3: Hovering (Stabilize)");
+      }
+      break;
+
+    // [단계 3] 정지 (2초)
+    case 3:
+      throttle = HOVER_HEIGHT;
+      pitch = 0; roll = 0;
+
+      if (timeElapsed > TIME_HOVER) {
+        flightState = 4;
+        timerStart = currentTime;
+        Serial.println("State 4: Moving Right (2.61m)");
+      }
+      break;
+
+    // [단계 4] 우측 이동 (2301ms)
+    case 4:
+      throttle = HOVER_HEIGHT;
+      pitch = 0;
+      roll = MOVE_POWER;
+
+      if (timeElapsed > TIME_RIGHT) {
+        flightState = 5;
+        timerStart = currentTime;
+        Serial.println("State 5: Hovering (Stabilize)");
+      }
+      break;
+
+    // [단계 5] 정지 (2초)
+    case 5:
+      throttle = HOVER_HEIGHT;
+      pitch = 0; roll = 0;
+
+      if (timeElapsed > TIME_HOVER) {
+        flightState = 6;
+        timerStart = currentTime;
+        Serial.println("State 6: Moving Backward (3.12m)");
+      }
+      break;
+
+    // [단계 6] 후진 (2357ms)
+    case 6:
+      throttle = HOVER_HEIGHT;
+      pitch = -MOVE_POWER;
+      roll = 0;
+
+      if (timeElapsed > TIME_FORWARD) {
+        flightState = 7;
+        timerStart = currentTime;
+        Serial.println("State 7: Hovering (Stabilize)");
+      }
+      break;
+
+    // [단계 7] 정지 (2초)
+    case 7:
+      throttle = HOVER_HEIGHT;
+      pitch = 0; roll = 0;
+
+      if (timeElapsed > TIME_HOVER) {
+        flightState = 8;
+        timerStart = currentTime;
+        Serial.println("State 8: Moving Left (2.61m)");
+      }
+      break;
+
+    // [단계 8] 좌측 이동 (2301ms)
+    case 8:
+      throttle = HOVER_HEIGHT;
+      pitch = 0;
+      roll = -MOVE_POWER;
+
+      if (timeElapsed > TIME_RIGHT) {
+        flightState = 9;
+        timerStart = currentTime;
+        Serial.println("State 9: Soft Landing...");
+      }
+      break;
+
+    // [단계 9] 소프트 랜딩 (서서히 하강)
+    case 9:
+      option = 0x000f; 
+      pitch = 0; roll = 0; yaw = 0;
+      
+      // 30ms마다 목표 고도를 1cm씩 낮춤
+      {
+        int landingHeight = HOVER_HEIGHT - (int)(timeElapsed / 30);
+        
+        if (landingHeight > 0) {
+          throttle = landingHeight; 
+        } else {
+          throttle = 0;
+          flightState = 10;
+          timerStart = currentTime;
+          Serial.println("State 10: Shutdown");
+        }
+      }
+      break;
+
+    // [단계 10] 완전 종료
+    case 10:
+      option = 0x000e; // 시동 OFF
+      throttle = 0; pitch = 0; roll = 0;
+      break;
   }
-  else if(elapsedTime < 2000) {
-    throttle = 60;  // 중간 고도
-  }
-  else if(elapsedTime < 3000) {
-    throttle = 30;  // 저고도
-  }
-  else {
-    throttle = 0;   // 완전 착륙
-  }
+
+  // --- 명령 전송 ---
+  checkCRC();
+  sendDroneCommand();
 }
 
-// 비상 정지
-void emergencyStop()
-{
-  roll = 0;
-  pitch = 0;
-  yaw = 0;
-  throttle = 0;
-  option = 0x000e;
-  currentPhase = COMPLETED;
-}
-//============ 자율비행 제어 함수 부분 끝 ============
-
-//-----------------------------------------------------
-
-//========= 드론 2호 제어 명령 구조 부분 시작 =========
-void sendDroneCommand()
-{
+// -----------------------------------------------------------
+// 통신 프로토콜 (수정 없음)
+// -----------------------------------------------------------
+void sendDroneCommand() {
   bleSerial.print("at+writeh000d");
   bleSerial.print(String(startBit_1, HEX));
   bleSerial.print(String(startBit_2, HEX));
   bleSerial.print(String(startBit_3, HEX));
   bleSerial.print(String(startBit_4, HEX));
   bleSerial.print(String(len, HEX));
-  //checkSum
-  if(checkSum < 0x10)
-    bleSerial.print("0" + String(checkSum, HEX));
-  else
-    bleSerial.print(String(checkSum, HEX));
-  //roll
-  if(payload[0] < 0x10)
-    bleSerial.print("0" + String(payload[0], HEX));
-  else
-    bleSerial.print(String(payload[0], HEX));
-  if(payload[1] < 0x10)
-    bleSerial.print("0" + String(payload[1], HEX));
-  else
-    bleSerial.print(String(payload[1], HEX));
-  //pitch
-  if(payload[2] < 0x10)
-    bleSerial.print("0" + String(payload[2], HEX));
-  else
-    bleSerial.print(String(payload[2], HEX));
-  if(payload[3] < 0x10)
-    bleSerial.print("0" + String(payload[3], HEX));
-  else
-    bleSerial.print(String(payload[3], HEX));
-  //yaw
-  if(payload[4] < 0x10)
-    bleSerial.print("0" + String(payload[4], HEX));
-  else
-    bleSerial.print(String(payload[4], HEX));
-  if(payload[5] < 0x10)
-    bleSerial.print("0" + String(payload[5], HEX));
-  else
-    bleSerial.print(String(payload[5], HEX));
-  //throttle
-  if(payload[6] < 0x10)
-    bleSerial.print("0" + String(payload[6], HEX));
-  else
-    bleSerial.print(String(payload[6], HEX));
-  if(payload[7] < 0x10)
-    bleSerial.print("0" + String(payload[7], HEX));
-  else
-    bleSerial.print(String(payload[7], HEX));
-  //option
-  if(payload[8] < 0x10)
-    bleSerial.print("0" + String(payload[8], HEX));
-  else
-    bleSerial.print(String(payload[8], HEX));
-  if(payload[9] < 0x10)
-    bleSerial.print("0" + String(payload[9], HEX));
-  else
-    bleSerial.print(String(payload[9], HEX));
-  //p_vel
-  if(payload[10] < 0x10)
-    bleSerial.print("0" + String(payload[10], HEX));
-  else
-    bleSerial.print(String(payload[10], HEX));
-  if(payload[11] < 0x10)
-    bleSerial.print("0" + String(payload[11], HEX));
-  else
-    bleSerial.print(String(payload[11], HEX));
-  //y_vel
-  if(payload[12] < 0x10)
-    bleSerial.print("0" + String(payload[12], HEX));
-  else
-    bleSerial.print(String(payload[12], HEX));
-  if(payload[13] < 0x10)
-    bleSerial.print("0" + String(payload[13], HEX));
-  else
-    bleSerial.print(String(payload[13], HEX));
-  //
+
+  if(checkSum < 0x10) bleSerial.print("0" + String(checkSum, HEX));
+  else bleSerial.print(String(checkSum, HEX));
+
+  for(int i=0; i<14; i++) {
+    if(payload[i] < 0x10) bleSerial.print("0" + String(payload[i], HEX));
+    else bleSerial.print(String(payload[i], HEX));
+  }
   bleSerial.print("\r");
   delay(50);
 }
-//========== 드론 2호 제어 명령 구조 부분 끝 ==========
 
-//-----------------------------------------------------
-
-//=== 데이터 전송시 오류 검출을 하기 위한 부분 시작 ===
-void checkCRC()
-{
+void checkCRC() {
   memset(payload, 0x00, 14);
-  //
   payload[0] = (roll) & 0x00ff;
   payload[1] = (roll >> 8) & 0x00ff;
   payload[2] = (pitch) & 0x00ff;
@@ -277,185 +240,12 @@ void checkCRC()
   payload[7] = (throttle >> 8) & 0x00ff;
   payload[8] = (option) & 0x00ff;
   payload[9] = (option >> 8) & 0x00ff;
-  //
   payload[10] = (p_vel) & 0x00ff;
   payload[11] = (p_vel >> 8) & 0x00ff;
   payload[12] = (y_vel) & 0x00ff;
   payload[13] = (y_vel >> 8) & 0x00ff;
-  //
+
   checkSum = 0;
-  for(int i = 0; i < 14; i++)
-    checkSum += payload[i];
+  for(int i = 0; i < 14; i++) checkSum += payload[i];
   checkSum = checkSum & 0x00ff;
 }
-//==== 데이터 전송시 오류 검출을 하기 위한 부분 끝 ====
-
-//-----------------------------------------------------
-
-//======== 자율비행 상태 머신 제어 부분 시작 ========
-void updateFlightPhase()
-{
-  unsigned long currentTime = millis();
-  unsigned long elapsedTime = currentTime - phaseStartTime;
-
-  // 비상정지 버튼 체크 (버튼 9)
-  if(!digitalRead(9) && currentPhase != IDLE && currentPhase != COMPLETED) {
-    Serial.println("Emergency Stop!");
-    emergencyStop();
-    return;
-  }
-
-  switch(currentPhase) {
-    case IDLE:
-      // 시작 버튼 대기 (버튼 5)
-      if(!digitalRead(5)) {
-        Serial.println("Flight Started!");
-        currentPhase = TAKEOFF;
-        phaseStartTime = currentTime;
-        drone_action = 1;
-      }
-      break;
-
-    case TAKEOFF:
-      takeoff();
-      if(elapsedTime > 2500) {  // 2.5초 이륙
-        Serial.println("Takeoff Complete - Hovering at Start");
-        currentPhase = HOVER_START;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case HOVER_START:
-      hoverDrone();
-      if(elapsedTime > HOVER_TIME) {
-        Serial.println("Moving to Point 2 (Right)");
-        currentPhase = MOVE_TO_P2;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case MOVE_TO_P2:
-      moveRight();
-      if(elapsedTime > TIME_TO_P2) {
-        Serial.println("Reached Point 2 - Hovering");
-        currentPhase = HOVER_P2;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case HOVER_P2:
-      hoverDrone();
-      if(elapsedTime > HOVER_TIME) {
-        Serial.println("Moving to Point 3 (Forward)");
-        currentPhase = MOVE_TO_P3;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case MOVE_TO_P3:
-      moveForward();
-      if(elapsedTime > TIME_TO_P3) {
-        Serial.println("Reached Point 3 - Hovering");
-        currentPhase = HOVER_P3;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case HOVER_P3:
-      hoverDrone();
-      if(elapsedTime > HOVER_TIME) {
-        Serial.println("Moving to Point 4 (Left)");
-        currentPhase = MOVE_TO_P4;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case MOVE_TO_P4:
-      moveLeft();
-      if(elapsedTime > TIME_TO_P4) {
-        Serial.println("Reached Point 4 - Hovering");
-        currentPhase = HOVER_P4;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case HOVER_P4:
-      hoverDrone();
-      if(elapsedTime > HOVER_TIME) {
-        Serial.println("Returning to Point 1 (Backward)");
-        currentPhase = MOVE_TO_P1;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case MOVE_TO_P1:
-      moveBackward();
-      if(elapsedTime > TIME_TO_P1) {
-        Serial.println("Returned to Start - Final Hovering");
-        currentPhase = HOVER_FINAL;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case HOVER_FINAL:
-      hoverDrone();
-      if(elapsedTime > HOVER_TIME) {
-        Serial.println("Starting Landing");
-        currentPhase = LANDING;
-        phaseStartTime = currentTime;
-      }
-      break;
-
-    case LANDING:
-      land();
-      if(elapsedTime > 3500) {  // 3.5초 착륙 (더 부드럽게)
-        Serial.println("Flight Completed!");
-        currentPhase = COMPLETED;
-        option = 0x000e;  // 모터 정지
-      }
-      break;
-
-    case COMPLETED:
-      roll = 0;
-      pitch = 0;
-      yaw = 0;
-      throttle = 0;
-      option = 0x000e;
-      break;
-  }
-}
-//========= 자율비행 상태 머신 제어 부분 끝 =========
-
-//-----------------------------------------------------
-
-//======== 아두이노 우노의 초기 설정 부분 시작 ========
-void setup()
-{
-  Serial.begin(9600);
-  Serial.println("Test Started!");
-  bleSerial.begin(9600);
-
-  for(int i = 5; i < 11; i++)
-  {
-    pinMode(i, INPUT);
-    digitalWrite(i, HIGH);
-  }
-  delay(500);
-}
-//========= 아두이노 우노의 초기 설정 부분 끝 =========
-
-//-----------------------------------------------------
-
-//======== 아두이노 우노의 무한 반복 부분 시작 ========
-void loop()
-{
-  // 자율비행 상태 머신 업데이트
-  updateFlightPhase();
-
-  // 드론 제어 명령 전송 (IDLE 상태가 아닐 때만)
-  if(currentPhase != IDLE) {
-    checkCRC();
-    sendDroneCommand();
-  }
-}
-//========= 아두이노 우노의 무한 반복 부분 끝 =========
